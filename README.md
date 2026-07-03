@@ -1,5 +1,8 @@
 # Mobile Mechanic Route Planner
 
+**📱 Live app: https://tristenharwell.github.io/mechanic-router/** — open it on your
+phone and choose *Add to Home Screen* to install it like an app.
+
 Plans and optimizes multi-day driving routes for a mobile mechanic. Runs entirely in
 your browser — no installs, no accounts, no API keys. Your data stays on your computer
 (saved in the browser's local storage).
