@@ -1,0 +1,16 @@
+{
+  "name": "Mobile Mechanic Route Planner",
+  "short_name": "Routes",
+  "description": "Plan and optimize multi-day driving routes for a mobile mechanic.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#14304f",
+  "background_color": "#f4f6f9",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

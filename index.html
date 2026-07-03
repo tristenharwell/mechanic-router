@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Mobile Mechanic Route Planner</title>
+<meta name="theme-color" content="#14304f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="topbar">
+  <h1>🔧 Mobile Mechanic Route Planner</h1>
+  <div id="topbar-actions">
+    <button id="btn-plan" class="primary">⚡ Optimize Routes</button>
+    <button id="btn-print" title="Print the current day's schedule">🖨 Print schedule</button>
+  </div>
+</header>
+
+<div id="layout">
+  <aside id="sidebar">
+
+    <!-- SETTINGS -->
+    <section class="panel" id="panel-settings">
+      <h2 class="panel-header" data-toggle="settings-body">⚙️ Settings <span class="chev">▾</span></h2>
+      <div class="panel-body" id="settings-body">
+        <label>Home base address
+          <input type="text" id="set-base" placeholder="e.g. 123 Main St, Dallas, TX">
+        </label>
+        <div class="row2">
+          <label>Workday start
+            <input type="time" id="set-start" value="08:00">
+          </label>
+          <label>Workday length (hrs)
+            <input type="number" id="set-hours" min="1" max="16" step="0.5" value="8">
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" id="set-return" checked> Return to home base at end of day</label>
+        <label>Customer “en route” message
+          <textarea id="set-notify" rows="3"></textarea>
+        </label>
+        <div class="hint">Placeholders: {first} {name} {job} {eta} {address} {vehicle}</div>
+        <div class="hint" id="base-status"></div>
+      </div>
+    </section>
+
+    <!-- IMPORT -->
+    <section class="panel" id="panel-import">
+      <h2 class="panel-header" data-toggle="import-body">📥 Import customers (ALLDATA) <span class="chev">▾</span></h2>
+      <div class="panel-body" id="import-body">
+        <p class="hint">In ALLDATA Manage Online, export your customer &amp; vehicle data
+        (Setup &raquo; User Options, or ask your account manager to enable Shop Data Export),
+        then load the CSV here. Re-import any time to refresh — existing customers are updated, not duplicated.</p>
+        <div class="row2">
+          <label class="file-label">
+            <input type="file" id="import-file" accept=".csv,.txt">
+            <span class="btn-like">Choose CSV file…</span>
+          </label>
+          <button id="btn-paste-csv">Paste CSV text…</button>
+        </div>
+        <textarea id="paste-area" class="hidden" rows="6" placeholder="Paste CSV text here (first row = column headers)"></textarea>
+        <button id="btn-parse-paste" class="hidden">Load pasted CSV</button>
+
+        <!-- column mapping UI, shown after a file is parsed -->
+        <div id="mapping-ui" class="hidden">
+          <h3>Match columns</h3>
+          <p class="hint">Confirm which CSV columns hold each field. Auto-detected where possible.</p>
+          <div id="mapping-rows"></div>
+          <div class="row2">
+            <button id="btn-do-import" class="primary">Import</button>
+            <button id="btn-cancel-import">Cancel</button>
+          </div>
+        </div>
+        <div class="hint" id="import-status"></div>
+      </div>
+    </section>
+
+    <!-- CUSTOMERS -->
+    <section class="panel" id="panel-customers">
+      <h2 class="panel-header" data-toggle="customers-body">👥 Customers <span id="customer-count" class="badge">0</span> <span class="chev">▾</span></h2>
+      <div class="panel-body" id="customers-body">
+        <input type="search" id="customer-search" placeholder="Search customers…">
+        <div id="customer-list" class="scroll-list"></div>
+        <details id="add-customer-details">
+          <summary>+ Add customer manually</summary>
+          <label>Name <input type="text" id="cust-name"></label>
+          <label>Address <input type="text" id="cust-address" placeholder="Street, City, State ZIP"></label>
+          <label>Phone <input type="text" id="cust-phone"></label>
+          <label>Email <input type="text" id="cust-email"></label>
+          <label>Vehicle <input type="text" id="cust-vehicle" placeholder="e.g. 2018 F-150"></label>
+          <button id="btn-add-customer" class="primary">Add customer</button>
+        </details>
+      </div>
+    </section>
+
+    <!-- JOBS -->
+    <section class="panel" id="panel-jobs">
+      <h2 class="panel-header" data-toggle="jobs-body">🛠 Jobs to schedule <span id="job-count" class="badge">0</span> <span class="chev">▾</span></h2>
+      <div class="panel-body" id="jobs-body">
+        <label>Customer
+          <input type="text" id="job-customer" list="customer-datalist" placeholder="Type to search…">
+          <datalist id="customer-datalist"></datalist>
+        </label>
+        <label>Job description
+          <input type="text" id="job-desc" placeholder="e.g. Brake pads front">
+        </label>
+        <label>Estimated duration (minutes)
+          <input type="number" id="job-duration" min="10" step="5" value="60">
+        </label>
+        <button id="btn-add-job" class="primary">Add job</button>
+        <div id="job-list" class="scroll-list"></div>
+        <button id="btn-clear-jobs" class="danger-link">Clear all jobs</button>
+      </div>
+    </section>
+
+    <!-- PLAN RESULTS -->
+    <section class="panel" id="panel-plan">
+      <h2 class="panel-header" data-toggle="plan-body">🗓 Route plan <span class="chev">▾</span></h2>
+      <div class="panel-body" id="plan-body">
+        <div id="plan-progress" class="hidden"><div class="spinner"></div><span id="plan-progress-text"></span></div>
+        <div id="plan-warnings"></div>
+        <div id="day-tabs"></div>
+        <div id="day-actions"></div>
+        <div id="day-schedule"></div>
+        <div id="plan-summary" class="hint"></div>
+      </div>
+    </section>
+
+  </aside>
+
+  <main id="map"></main>
+</div>
+
+<div id="modal-backdrop" class="hidden">
+  <div id="modal">
+    <button id="modal-close" title="Close">✕</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
