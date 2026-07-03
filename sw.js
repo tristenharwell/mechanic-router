@@ -1,6 +1,8 @@
-/* Service worker: caches the app shell so the installed app launches offline.
- * Live data (geocoding, routing, map tiles) always goes to the network. */
-const CACHE = "mmr-shell-v1";
+/* Service worker: keeps the app shell available offline.
+ * Same-origin files: network-first (so updates arrive), cache fallback offline.
+ * CDN libs: cache-first (versioned URLs never change).
+ * Live data (geocoding, routing, tiles, GitHub sync): network only. */
+const CACHE = "mmr-shell-v2";
 const SHELL = [
   "./",
   "./index.html",
@@ -27,23 +29,36 @@ self.addEventListener("activate", (e) => {
 });
 
 self.addEventListener("fetch", (e) => {
+  if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
-  const isShell =
-    url.origin === location.origin ||
-    url.hostname === "unpkg.com";
-  if (e.request.method !== "GET" || !isShell) return; // APIs & tiles: network only
 
-  e.respondWith(
-    caches.match(e.request, { ignoreSearch: url.origin === location.origin }).then(
-      (hit) =>
-        hit ||
-        fetch(e.request).then((resp) => {
+  if (url.origin === location.origin) {
+    // network-first so deployed updates show up on next launch
+    e.respondWith(
+      fetch(e.request)
+        .then((resp) => {
           if (resp.ok) {
             const copy = resp.clone();
             caches.open(CACHE).then((c) => c.put(e.request, copy));
           }
           return resp;
         })
-    )
-  );
+        .catch(() => caches.match(e.request, { ignoreSearch: true }))
+    );
+  } else if (url.hostname === "unpkg.com") {
+    e.respondWith(
+      caches.match(e.request).then(
+        (hit) =>
+          hit ||
+          fetch(e.request).then((resp) => {
+            if (resp.ok) {
+              const copy = resp.clone();
+              caches.open(CACHE).then((c) => c.put(e.request, copy));
+            }
+            return resp;
+          })
+      )
+    );
+  }
+  // everything else (APIs, tiles, github): straight to network
 });

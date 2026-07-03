@@ -64,6 +64,22 @@ The app auto-detects columns (name, address, city, state, ZIP, phone, vehicle) a
 you to confirm. **Re-import any time to refresh** — existing customers are matched by
 name + address and updated in place, never duplicated.
 
+## Syncing between PC and phone
+
+The **☁️ Sync between devices** panel keeps customers, jobs, and settings identical
+everywhere, using the private GitHub repo `mechanic-router-data` as storage. One-time
+setup on each device:
+
+1. On github.com: **Settings » Developer settings » Fine-grained tokens » Generate new token**
+   - Repository access: *Only select repositories* → `mechanic-router-data`
+   - Permissions: *Contents — Read and write*
+   - Expiration: pick the longest you're comfortable with (you'll re-paste when it expires)
+2. Paste the token into the Sync panel on that device.
+
+Sync then runs automatically at every launch and a few seconds after each change
+(and via **Sync now**). Edits merge per record — the newest change wins, and deletions
+carry across devices. The token is stored only in that device's browser storage.
+
 ## Notes & limits
 
 - Internet connection required (map tiles, geocoding, drive times).

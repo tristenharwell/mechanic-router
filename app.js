@@ -18,8 +18,9 @@ const state = {
     returnToBase: true,
     notifyTemplate: "Hi {first}, this is your mobile mechanic. I'm on my way for your {job} ({vehicle}). ETA about {eta}.",
   },
-  customers: [],              // {id, name, address, phone, vehicle, lat, lon}
-  jobs: [],                   // {id, customerId, desc, durationMin}
+  customers: [],              // {id, name, address, phone, email, vehicle, lat, lon, updatedAt}
+  jobs: [],                   // {id, customerId, desc, durationMin, updatedAt}
+  tombstones: [],             // {id, deletedAt} — so deletions replicate across devices
 };
 
 let geocache = {};            // normalized address -> {lat, lon} | {fail: true}
@@ -28,6 +29,7 @@ let activeDay = 0;
 
 function saveState() {
   localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  scheduleSync();
 }
 function loadState() {
   try {
@@ -37,9 +39,17 @@ function loadState() {
       Object.assign(state.settings, s.settings || {});
       state.customers = s.customers || [];
       state.jobs = s.jobs || [];
+      state.tombstones = s.tombstones || [];
     }
     geocache = JSON.parse(localStorage.getItem(GEO_KEY) || "{}");
   } catch (e) { console.warn("Failed to load saved data", e); }
+}
+function touchSettings() {
+  state.settings.updatedAt = Date.now();
+  saveState();
+}
+function addTombstone(id) {
+  state.tombstones.push({ id, deletedAt: Date.now() });
 }
 function saveGeocache() {
   localStorage.setItem(GEO_KEY, JSON.stringify(geocache));
@@ -69,10 +79,10 @@ function initMap() {
 
 const normAddr = (a) => a.trim().toLowerCase().replace(/\s+/g, " ");
 
-function fetchWithTimeout(url, ms) {
+function fetchWithTimeout(url, ms, opts = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), ms);
-  return fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(timer));
+  return fetch(url, { ...opts, signal: ctl.signal }).finally(() => clearTimeout(timer));
 }
 
 // Free geocoders, tried in order — some networks stall one service but not others.
@@ -264,9 +274,10 @@ function runImport() {
       if (phone) existing.phone = phone;
       if (email) existing.email = email;
       if (vehicle) existing.vehicle = vehicle;
+      existing.updatedAt = Date.now();
       updated++;
     } else {
-      state.customers.push({ id: uid(), name, address, phone, email, vehicle, lat: null, lon: null });
+      state.customers.push({ id: uid(), name, address, phone, email, vehicle, lat: null, lon: null, updatedAt: Date.now() });
       added++;
     }
   }
@@ -509,6 +520,155 @@ async function optimizeRoutes() {
   }
 }
 
+/* ------------------- cross-device sync (GitHub) ------------------- */
+/* The app's private repo is the sync store: every device pushes/pulls
+ * state.json via the GitHub Contents API using a fine-grained token
+ * that can only touch that one repo. Records merge by updatedAt;
+ * tombstones replicate deletions. */
+
+const SYNC_REPO = { owner: "tristenharwell", repo: "mechanic-router-data", path: "state.json" };
+const TOKEN_KEY = "mmr_sync_token";
+
+let syncTimer = null;
+let syncing = false;
+
+const getSyncToken = () => localStorage.getItem(TOKEN_KEY) || "";
+const b64encode = (s) => btoa(unescape(encodeURIComponent(s)));
+const b64decode = (s) => decodeURIComponent(escape(atob(s.replace(/\s/g, ""))));
+
+function setSyncStatus(text) {
+  const el = $("sync-status");
+  if (el) el.textContent = text;
+}
+
+function scheduleSync() {
+  if (syncing || !getSyncToken()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(), 4000);
+}
+
+function ghContents(method, body) {
+  const url = `https://api.github.com/repos/${SYNC_REPO.owner}/${SYNC_REPO.repo}/contents/${SYNC_REPO.path}`;
+  return fetchWithTimeout(url, 15000, {
+    method,
+    headers: {
+      "Authorization": "Bearer " + getSyncToken(),
+      "Accept": "application/vnd.github+json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+// stable stringify so "did anything change?" ignores key order
+function stableStr(v) {
+  if (Array.isArray(v)) return "[" + v.map(stableStr).join(",") + "]";
+  if (v && typeof v === "object")
+    return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + stableStr(v[k])).join(",") + "}";
+  return JSON.stringify(v);
+}
+
+function mergeTombstones(a = [], b = []) {
+  const map = new Map();
+  for (const t of [...a, ...b]) {
+    const prev = map.get(t.id);
+    if (!prev || t.deletedAt > prev.deletedAt) map.set(t.id, t);
+  }
+  return [...map.values()].sort((x, y) => y.deletedAt - x.deletedAt).slice(0, 500);
+}
+
+function mergeEntities(local = [], remote = [], tombs = []) {
+  const map = new Map();
+  for (const e of [...remote, ...local]) {
+    const prev = map.get(e.id);
+    if (!prev || (e.updatedAt || 0) > (prev.updatedAt || 0)) map.set(e.id, e);
+  }
+  for (const t of tombs) {
+    const e = map.get(t.id);
+    if (e && (e.updatedAt || 0) <= t.deletedAt) map.delete(t.id);
+  }
+  return [...map.values()];
+}
+
+function mergeStates(local, remote) {
+  const tombs = mergeTombstones(local.tombstones, remote.tombstones);
+  const rs = remote.settings || {};
+  return {
+    settings: (local.settings.updatedAt || 0) >= (rs.updatedAt || 0) ? local.settings : rs,
+    customers: mergeEntities(local.customers, remote.customers, tombs),
+    jobs: mergeEntities(local.jobs, remote.jobs, tombs),
+    tombstones: tombs,
+  };
+}
+
+function stateSnapshot() {
+  return {
+    settings: state.settings,
+    customers: state.customers,
+    jobs: state.jobs,
+    tombstones: state.tombstones,
+  };
+}
+
+async function syncNow() {
+  if (syncing) return;
+  if (!getSyncToken()) { setSyncStatus("Paste your GitHub token above to enable sync."); return; }
+  syncing = true;
+  clearTimeout(syncTimer);
+  setSyncStatus("Syncing…");
+  try {
+    /* pull */
+    let remote = null, sha = null;
+    const resp = await ghContents("GET");
+    if (resp.status === 200) {
+      const j = await resp.json();
+      sha = j.sha;
+      try { remote = JSON.parse(b64decode(j.content)); } catch { remote = null; }
+    } else if (resp.status === 401 || resp.status === 403) {
+      throw new Error("GitHub rejected the token — check it hasn't expired and can access " + SYNC_REPO.repo + ".");
+    } else if (resp.status !== 404) {
+      throw new Error("GitHub error " + resp.status);
+    }
+
+    /* merge remote into local */
+    if (remote) {
+      const merged = mergeStates(stateSnapshot(), remote);
+      state.settings = merged.settings;
+      state.customers = merged.customers.sort((a, b) => a.name.localeCompare(b.name));
+      state.jobs = merged.jobs;
+      state.tombstones = merged.tombstones;
+      localStorage.setItem(STORE_KEY, JSON.stringify(state)); // save without re-triggering sync
+      applySettingsToUI();
+      renderCustomers();
+      renderJobs();
+    }
+
+    /* push back if we have anything the remote doesn't */
+    if (!remote || stableStr(stateSnapshot()) !== stableStr(remote)) {
+      const put = await ghContents("PUT", {
+        message: "sync " + new Date().toISOString(),
+        content: b64encode(JSON.stringify(stateSnapshot(), null, 1)),
+        ...(sha ? { sha } : {}),
+      });
+      if (put.status === 409 || put.status === 422) throw new Error("Another device synced at the same moment — press Sync now again.");
+      if (!put.ok) throw new Error("GitHub push failed (" + put.status + ")");
+    }
+    localStorage.setItem("mmr_last_sync", String(Date.now()));
+    setSyncStatus("✓ Synced " + new Date().toLocaleTimeString());
+  } catch (e) {
+    setSyncStatus("⚠ " + (e.name === "AbortError" ? "GitHub not reachable (offline?)" : e.message));
+  } finally {
+    syncing = false;
+  }
+}
+
+function applySettingsToUI() {
+  $("set-base").value = state.settings.baseAddress;
+  $("set-start").value = state.settings.dayStart;
+  $("set-hours").value = state.settings.dayHours;
+  $("set-return").checked = state.settings.returnToBase;
+  $("set-notify").value = state.settings.notifyTemplate;
+}
+
 /* ---------------- send-to-phone & customer notify ---------------- */
 
 function openModal(html) {
@@ -749,20 +909,25 @@ function wireUI() {
   });
 
   // settings
-  $("set-base").value = state.settings.baseAddress;
-  $("set-start").value = state.settings.dayStart;
-  $("set-hours").value = state.settings.dayHours;
-  $("set-return").checked = state.settings.returnToBase;
+  applySettingsToUI();
   $("set-base").addEventListener("change", e => {
     state.settings.baseAddress = e.target.value;
     state.settings.baseCoord = null;
-    saveState();
+    touchSettings();
   });
-  $("set-start").addEventListener("change", e => { state.settings.dayStart = e.target.value; saveState(); });
-  $("set-hours").addEventListener("change", e => { state.settings.dayHours = +e.target.value || 8; saveState(); });
-  $("set-return").addEventListener("change", e => { state.settings.returnToBase = e.target.checked; saveState(); });
-  $("set-notify").value = state.settings.notifyTemplate;
-  $("set-notify").addEventListener("change", e => { state.settings.notifyTemplate = e.target.value; saveState(); });
+  $("set-start").addEventListener("change", e => { state.settings.dayStart = e.target.value; touchSettings(); });
+  $("set-hours").addEventListener("change", e => { state.settings.dayHours = +e.target.value || 8; touchSettings(); });
+  $("set-return").addEventListener("change", e => { state.settings.returnToBase = e.target.checked; touchSettings(); });
+  $("set-notify").addEventListener("change", e => { state.settings.notifyTemplate = e.target.value; touchSettings(); });
+
+  // sync
+  $("sync-token").value = getSyncToken();
+  $("sync-token").addEventListener("change", e => {
+    const v = e.target.value.trim();
+    if (v) localStorage.setItem(TOKEN_KEY, v); else localStorage.removeItem(TOKEN_KEY);
+    if (v) syncNow();
+  });
+  $("btn-sync").addEventListener("click", () => syncNow());
 
   // import
   $("import-file").addEventListener("change", e => {
@@ -790,6 +955,8 @@ function wireUI() {
     if (!c) return;
     if (btn.dataset.act === "del") {
       if (!confirm(`Delete customer "${c.name}"? Their pending jobs will be removed too.`)) return;
+      addTombstone(c.id);
+      state.jobs.filter(j => j.customerId === c.id).forEach(j => addTombstone(j.id));
       state.customers = state.customers.filter(x => x.id !== c.id);
       state.jobs = state.jobs.filter(j => j.customerId !== c.id);
       saveState(); renderCustomers(); renderJobs();
@@ -808,6 +975,7 @@ function wireUI() {
       email: $("cust-email").value.trim(),
       vehicle: $("cust-vehicle").value.trim(),
       lat: null, lon: null,
+      updatedAt: Date.now(),
     });
     state.customers.sort((a, b) => a.name.localeCompare(b.name));
     saveState(); renderCustomers();
@@ -820,19 +988,21 @@ function wireUI() {
     const cust = state.customers.find(c => c.name.toLowerCase() === name.toLowerCase());
     if (!cust) { alert("Pick an existing customer (import or add them first)."); return; }
     const durationMin = +$("job-duration").value || 60;
-    state.jobs.push({ id: uid(), customerId: cust.id, desc: $("job-desc").value.trim(), durationMin });
+    state.jobs.push({ id: uid(), customerId: cust.id, desc: $("job-desc").value.trim(), durationMin, updatedAt: Date.now() });
     saveState(); renderJobs();
     $("job-customer").value = ""; $("job-desc").value = "";
   });
   $("job-list").addEventListener("click", e => {
     const btn = e.target.closest("button");
     if (btn && btn.dataset.act === "deljob") {
+      addTombstone(btn.dataset.id);
       state.jobs = state.jobs.filter(j => j.id !== btn.dataset.id);
       saveState(); renderJobs();
     }
   });
   $("btn-clear-jobs").addEventListener("click", () => {
     if (state.jobs.length && confirm("Remove all jobs from the schedule?")) {
+      state.jobs.forEach(j => addTombstone(j.id));
       state.jobs = []; saveState(); renderJobs();
     }
   });
@@ -875,3 +1045,5 @@ renderJobs();
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW registration failed", e));
 }
+
+if (getSyncToken()) syncNow(); // pull latest from other devices on launch

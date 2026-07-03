@@ -80,6 +80,25 @@
       </div>
     </section>
 
+    <!-- SYNC -->
+    <section class="panel" id="panel-sync">
+      <h2 class="panel-header" data-toggle="sync-body">☁️ Sync between devices <span class="chev">▾</span></h2>
+      <div class="panel-body" id="sync-body">
+        <p class="hint">Keeps customers, jobs, and settings identical on your PC and phone,
+        stored in your private GitHub repo <b>mechanic-router-data</b>. One-time setup on each device:
+        paste an access token below. To create it: github.com → Settings → Developer settings →
+        <b>Fine-grained tokens</b> → Generate new token → Repository access: <b>only mechanic-router-data</b>
+        → Permissions: <b>Contents — Read and write</b>. Set a long expiration.</p>
+        <label>GitHub access token
+          <input type="password" id="sync-token" placeholder="github_pat_…" autocomplete="off">
+        </label>
+        <button id="btn-sync" class="primary">☁ Sync now</button>
+        <div class="hint" id="sync-status"></div>
+        <p class="hint">Sync also runs automatically when the app opens and a few seconds after every change.
+        The token is stored only on this device.</p>
+      </div>
+    </section>
+
     <!-- CUSTOMERS -->
     <section class="panel" id="panel-customers">
       <h2 class="panel-header" data-toggle="customers-body">👥 Customers <span id="customer-count" class="badge">0</span> <span class="chev">▾</span></h2>
