@@ -2,7 +2,7 @@
  * Same-origin files: network-first (so updates arrive), cache fallback offline.
  * CDN libs: cache-first (versioned URLs never change).
  * Live data (geocoding, routing, tiles, GitHub sync): network only. */
-const CACHE = "mmr-shell-v2";
+const CACHE = "mmr-shell-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -11,9 +11,8 @@ const SHELL = [
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
-  "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
-  "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
   "https://unpkg.com/qrcode-generator@1.4.4/qrcode.js",
+  "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js",
 ];
 
 self.addEventListener("install", (e) => {
@@ -45,7 +44,7 @@ self.addEventListener("fetch", (e) => {
         })
         .catch(() => caches.match(e.request, { ignoreSearch: true }))
     );
-  } else if (url.hostname === "unpkg.com") {
+  } else if (url.hostname === "unpkg.com" || url.hostname === "cdn.jsdelivr.net") {
     e.respondWith(
       caches.match(e.request).then(
         (hit) =>

@@ -1,8 +1,18 @@
 /* Mobile Mechanic Route Planner
- * Static app: Leaflet map, Nominatim geocoding, OSRM drive times.
- * Customer data imported from ALLDATA Manage Online CSV exports.
+ * Static PWA: Google Maps Platform (map display, address autocomplete,
+ * traffic-aware drive times via Routes API), Supabase login + per-account
+ * cloud sync. Customer data imported from ALLDATA Manage Online CSV exports.
  */
 "use strict";
+
+/* Public client-side config: the Maps key is website-restricted to this
+ * app's URLs, and the Supabase publishable key is guarded by Row Level
+ * Security — neither grants access beyond what the app itself can do. */
+const CONFIG = {
+  supabaseUrl: "https://vnxeobxnfozaypjhltsa.supabase.co",
+  supabaseAnonKey: "sb_publishable_s-QTeNxcox4dy2uyP3rPpw_UwBuv_uT",
+  gmapsKey: "AIzaSyAN5gMd1EpaQ3XmeQWulSAbSFrJ8hwucZM",
+};
 
 /* ---------------------------- state ---------------------------- */
 
@@ -64,15 +74,125 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
 
 const DAY_COLORS = ["#1769d0", "#d05017", "#178a4c", "#8a17b8", "#b8a117", "#17a3b8", "#d01769"];
 
-let map, planLayer;
+let map = null;
+let planOverlays = [];   // markers + polylines currently on the map
+let infoWindow = null;
+let gmapsReadyResolve;
+const gmapsReady = new Promise(r => { gmapsReadyResolve = r; });
 
-function initMap() {
-  map = L.map("map").setView([39.5, -96], 5); // continental US until we know better
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
-  planLayer = L.layerGroup().addTo(map);
+window.__gmapsReady = () => gmapsReadyResolve();
+window.gm_authFailure = () => {
+  setMapNotice("Google Maps rejected the API key — check that the key allows this site and the Maps JavaScript API is enabled.");
+};
+
+function loadGoogleMaps() {
+  const s = document.createElement("script");
+  s.src = "https://maps.googleapis.com/maps/api/js?key=" + CONFIG.gmapsKey +
+    "&libraries=places,geometry&v=weekly&loading=async&callback=__gmapsReady";
+  s.async = true;
+  s.onerror = () => setMapNotice("Couldn't load Google Maps — check the internet connection.");
+  document.head.appendChild(s);
+}
+
+function setMapNotice(text) {
+  let el = $("map-notice");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "map-notice";
+    $("map").appendChild(el);
+  }
+  el.textContent = text;
+  el.style.display = text ? "block" : "none";
+}
+
+async function initMap() {
+  await gmapsReady;
+  map = new google.maps.Map($("map"), {
+    center: { lat: 39.5, lng: -96 }, // continental US until we know better
+    zoom: 5,
+    mapTypeControl: false,
+    streetViewControl: false,
+    fullscreenControl: false,
+    clickableIcons: false,
+  });
+  infoWindow = new google.maps.InfoWindow();
+  attachAutocomplete();
+}
+
+function clearOverlays() {
+  planOverlays.forEach(o => o.setMap(null));
+  planOverlays = [];
+}
+
+function addStopMarker(pos, color, num, popupHtml) {
+  const m = new google.maps.Marker({
+    map,
+    position: pos,
+    icon: {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 14,
+      fillColor: color,
+      fillOpacity: 1,
+      strokeColor: "#ffffff",
+      strokeWeight: 2.5,
+    },
+    label: { text: String(num), color: "#fff", fontWeight: "700", fontSize: "13px" },
+  });
+  m.addListener("click", () => { infoWindow.setContent(popupHtml); infoWindow.open({ map, anchor: m }); });
+  planOverlays.push(m);
+  return m;
+}
+
+function addBaseMarker(pos, popupHtml) {
+  const m = new google.maps.Marker({
+    map,
+    position: pos,
+    icon: {
+      path: "M -11 -11 H 11 V 11 H -11 Z",
+      scale: 1,
+      fillColor: "#14304f",
+      fillOpacity: 1,
+      strokeColor: "#ffffff",
+      strokeWeight: 2.5,
+    },
+    label: { text: "🏠", fontSize: "13px" },
+    zIndex: 999,
+  });
+  m.addListener("click", () => { infoWindow.setContent(popupHtml); infoWindow.open({ map, anchor: m }); });
+  planOverlays.push(m);
+  return m;
+}
+
+/* Places autocomplete on the address inputs; picking a suggestion also
+ * stores exact coordinates so geocoding can't mismatch later. */
+let pendingCustCoord = null; // coords picked in the add-customer address box
+function attachAutocomplete() {
+  const opts = { fields: ["formatted_address", "geometry"], types: ["address"] };
+
+  const baseAc = new google.maps.places.Autocomplete($("set-base"), opts);
+  baseAc.addListener("place_changed", () => {
+    const p = baseAc.getPlace();
+    if (!p.geometry) return;
+    state.settings.baseAddress = p.formatted_address;
+    state.settings.baseCoord = { lat: p.geometry.location.lat(), lon: p.geometry.location.lng() };
+    geocache[normAddr(p.formatted_address)] = state.settings.baseCoord;
+    saveGeocache();
+    $("set-base").value = p.formatted_address;
+    touchSettings();
+    map.setCenter(p.geometry.location);
+    if (map.getZoom() < 10) map.setZoom(11);
+  });
+
+  const custAc = new google.maps.places.Autocomplete($("cust-address"), opts);
+  custAc.addListener("place_changed", () => {
+    const p = custAc.getPlace();
+    if (!p.geometry) return;
+    $("cust-address").value = p.formatted_address;
+    pendingCustCoord = { lat: p.geometry.location.lat(), lon: p.geometry.location.lng() };
+    geocache[normAddr(p.formatted_address)] = pendingCustCoord;
+    saveGeocache();
+  });
+  $("cust-address").addEventListener("input", () => { pendingCustCoord = null; });
 }
 
 /* ------------------------- geocoding ------------------------- */
@@ -109,17 +229,49 @@ const GEOCODERS = [
   },
 ];
 
+// Primary geocoder: Google (via the Maps JS API, so the website-restricted
+// key works). Resolves to coords, "none" for a confirmed no-match, or null
+// when the service errored and the free fallback chain should try.
+function geocodeGoogle(address) {
+  return new Promise(resolve => {
+    try {
+      new google.maps.Geocoder().geocode({ address }, (results, status) => {
+        if (status === "OK" && results && results.length) {
+          const loc = results[0].geometry.location;
+          resolve({ lat: loc.lat(), lon: loc.lng() });
+        } else {
+          resolve(status === "ZERO_RESULTS" ? "none" : null);
+        }
+      });
+    } catch { resolve(null); }
+  });
+}
+
 let lastGeocodeAt = 0;
 async function geocode(address) {
   const key = normAddr(address);
   if (!key) return null;
   if (geocache[key]) return geocache[key].fail ? null : geocache[key];
 
-  // be polite to the free services: min 700ms between lookups
-  const wait = lastGeocodeAt + 700 - Date.now();
+  // gentle pacing so bulk imports don't trip per-second quotas
+  const wait = lastGeocodeAt + 250 - Date.now();
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastGeocodeAt = Date.now();
 
+  await gmapsReady;
+  const g = await geocodeGoogle(address);
+  if (g === "none") {
+    geocache[key] = { fail: true };
+    saveGeocache();
+    return null;
+  }
+  if (g) {
+    geocache[key] = g;
+    saveGeocache();
+    return g;
+  }
+
+  // Google unavailable — fall back to the free services
   let answered = false;
   for (const g of GEOCODERS) {
     try {
@@ -143,28 +295,84 @@ async function geocode(address) {
   return null;
 }
 
-/* --------------------------- OSRM --------------------------- */
+/* ------------------- Google Routes API ------------------- */
 
-const OSRM = "https://router.project-osrm.org";
+const ROUTES_BASE = "https://routes.googleapis.com";
+const wp = (c) => ({ waypoint: { location: { latLng: { latitude: c.lat, longitude: c.lon } } } });
+// live traffic needs a departure time slightly in the future
+const soon = () => new Date(Date.now() + 90 * 1000).toISOString();
 
-// coords: [{lat, lon}, ...] -> seconds matrix [i][j]
-async function fetchDurationMatrix(coords) {
-  const path = coords.map(c => c.lon + "," + c.lat).join(";");
-  const resp = await fetchWithTimeout(`${OSRM}/table/v1/driving/${path}?annotations=duration`, 20000);
-  if (!resp.ok) throw new Error("Routing service error (" + resp.status + ")");
-  const data = await resp.json();
-  if (data.code !== "Ok") throw new Error("Routing failed: " + data.code);
-  return data.durations;
+async function routesPost(path, fieldMask, body) {
+  const resp = await fetchWithTimeout(ROUTES_BASE + path, 25000, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": CONFIG.gmapsKey,
+      "X-Goog-FieldMask": fieldMask,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let detail = "";
+    try { detail = (await resp.json()).error.message; } catch {}
+    throw new Error("Google Routes error " + resp.status + (detail ? ": " + detail : ""));
+  }
+  return resp.json();
 }
 
-// ordered coords -> GeoJSON line coordinates [[lat,lon],...]
+const parseSecs = (d) => d ? parseFloat(String(d).replace("s", "")) : null;
+
+// coords: [{lat, lon}, ...] -> seconds matrix [i][j], traffic-aware.
+// Chunked to stay inside the API's 625-elements-per-request limit.
+async function fetchDurationMatrix(coords) {
+  const n = coords.length;
+  const matrix = Array.from({ length: n }, () => new Array(n).fill(null));
+  const CHUNK = 25;
+  for (let oi = 0; oi < n; oi += CHUNK) {
+    for (let di = 0; di < n; di += CHUNK) {
+      const origins = coords.slice(oi, oi + CHUNK);
+      const dests = coords.slice(di, di + CHUNK);
+      const rows = await routesPost("/distanceMatrix/v2:computeRouteMatrix",
+        "originIndex,destinationIndex,duration,condition",
+        {
+          origins: origins.map(wp),
+          destinations: dests.map(wp),
+          travelMode: "DRIVE",
+          routingPreference: "TRAFFIC_AWARE",
+          departureTime: soon(),
+        });
+      for (const cell of rows) {
+        const secs = cell.condition === "ROUTE_EXISTS" ? parseSecs(cell.duration) : null;
+        matrix[oi + cell.originIndex][di + cell.destinationIndex] = secs;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) matrix[i][i] = 0;
+  return matrix;
+}
+
+// ordered coords -> [[lat, lon], ...] polyline following real roads
 async function fetchRouteGeometry(coords) {
-  const path = coords.map(c => c.lon + "," + c.lat).join(";");
-  const resp = await fetchWithTimeout(`${OSRM}/route/v1/driving/${path}?overview=full&geometries=geojson`, 20000);
-  if (!resp.ok) return null;
-  const data = await resp.json();
-  if (data.code !== "Ok" || !data.routes.length) return null;
-  return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+  if (coords.length < 2) return null;
+  try {
+    const data = await routesPost("/directions/v2:computeRoutes",
+      "routes.polyline.encodedPolyline",
+      {
+        origin: wp(coords[0]).waypoint,
+        destination: wp(coords[coords.length - 1]).waypoint,
+        intermediates: coords.slice(1, -1).map(c => wp(c).waypoint),
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_AWARE",
+        departureTime: soon(),
+        polylineEncoding: "ENCODED_POLYLINE",
+      });
+    const enc = data.routes && data.routes[0] && data.routes[0].polyline.encodedPolyline;
+    if (!enc) return null;
+    return google.maps.geometry.encoding.decodePath(enc).map(p => [p.lat(), p.lng()]);
+  } catch (e) {
+    console.warn("Route polyline unavailable:", e.message);
+    return null;
+  }
 }
 
 /* ---------------------- CSV import ---------------------- */
@@ -520,21 +728,15 @@ async function optimizeRoutes() {
   }
 }
 
-/* ------------------- cross-device sync (GitHub) ------------------- */
-/* The app's private repo is the sync store: every device pushes/pulls
- * state.json via the GitHub Contents API using a fine-grained token
- * that can only touch that one repo. Records merge by updatedAt;
- * tombstones replicate deletions. */
+/* --------------- login + cloud sync (Supabase) --------------- */
+/* Each account owns one row in the app_state table; Row Level Security
+ * means an account can only ever see its own row. Records merge by
+ * updatedAt; tombstones replicate deletions. */
 
-const SYNC_REPO = { owner: "tristenharwell", repo: "mechanic-router-data", path: "state.json" };
-const TOKEN_KEY = "mmr_sync_token";
-
+let sb = null;
+let currentUser = null;
 let syncTimer = null;
 let syncing = false;
-
-const getSyncToken = () => localStorage.getItem(TOKEN_KEY) || "";
-const b64encode = (s) => btoa(unescape(encodeURIComponent(s)));
-const b64decode = (s) => decodeURIComponent(escape(atob(s.replace(/\s/g, ""))));
 
 function setSyncStatus(text) {
   const el = $("sync-status");
@@ -542,21 +744,72 @@ function setSyncStatus(text) {
 }
 
 function scheduleSync() {
-  if (syncing || !getSyncToken()) return;
+  if (syncing || !currentUser) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => syncNow(), 4000);
 }
 
-function ghContents(method, body) {
-  const url = `https://api.github.com/repos/${SYNC_REPO.owner}/${SYNC_REPO.repo}/contents/${SYNC_REPO.path}`;
-  return fetchWithTimeout(url, 15000, {
-    method,
-    headers: {
-      "Authorization": "Bearer " + getSyncToken(),
-      "Accept": "application/vnd.github+json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
+function initSupabase() {
+  sb = supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey);
+  sb.auth.onAuthStateChange((event, session) => {
+    const hadUser = !!currentUser;
+    currentUser = session ? session.user : null;
+    updateAuthUI();
+    if (currentUser && !hadUser) syncNow();
+    if (event === "SIGNED_OUT") wipeLocalData();
   });
+}
+
+function updateAuthUI() {
+  $("auth-screen").classList.toggle("hidden", !!currentUser);
+  $("account-info").textContent = currentUser ? "Signed in as " + currentUser.email : "";
+  if (!currentUser) {
+    $("auth-msg").textContent = "";
+    $("auth-pass").value = "";
+  }
+}
+
+function authMsg(text) { $("auth-msg").textContent = text; }
+
+async function doSignIn() {
+  const email = $("auth-email").value.trim();
+  const password = $("auth-pass").value;
+  if (!email || !password) { authMsg("Enter your email and password."); return; }
+  authMsg("Signing in…");
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) authMsg("⚠ " + error.message);
+}
+
+async function doSignUp() {
+  const email = $("auth-email").value.trim();
+  const password = $("auth-pass").value;
+  if (!email || !password) { authMsg("Enter an email and choose a password (8+ characters)."); return; }
+  authMsg("Creating account…");
+  const { data, error } = await sb.auth.signUp({ email, password });
+  if (error) { authMsg("⚠ " + error.message); return; }
+  if (!data.session) authMsg("Account created — check your email for a confirmation link, then sign in.");
+}
+
+function wipeLocalData() {
+  // shared computers shouldn't keep the previous account's customers around
+  state.customers = [];
+  state.jobs = [];
+  state.tombstones = [];
+  plan = null;
+  localStorage.removeItem(STORE_KEY);
+  renderCustomers();
+  renderJobs();
+  renderPlan();
+  setSyncStatus("");
+}
+
+function friendlySyncError(error) {
+  const msg = (error && error.message) || String(error);
+  if (/app_state.*schema cache|relation .* does not exist|PGRST205/i.test(msg))
+    return "Cloud storage table missing — run the one-time setup SQL in the Supabase dashboard.";
+  if (/Failed to fetch|NetworkError|AbortError/i.test(msg))
+    return "Cloud not reachable — will retry on the next change (offline?).";
+  return msg;
 }
 
 // stable stringify so "did anything change?" ignores key order
@@ -611,27 +864,21 @@ function stateSnapshot() {
 
 async function syncNow() {
   if (syncing) return;
-  if (!getSyncToken()) { setSyncStatus("Paste your GitHub token above to enable sync."); return; }
+  if (!sb || !currentUser) { setSyncStatus("Sign in to sync."); return; }
   syncing = true;
   clearTimeout(syncTimer);
   setSyncStatus("Syncing…");
   try {
-    /* pull */
-    let remote = null, sha = null;
-    const resp = await ghContents("GET");
-    if (resp.status === 200) {
-      const j = await resp.json();
-      sha = j.sha;
-      try { remote = JSON.parse(b64decode(j.content)); } catch { remote = null; }
-    } else if (resp.status === 401 || resp.status === 403) {
-      throw new Error("GitHub rejected the token — check it hasn't expired and can access " + SYNC_REPO.repo + ".");
-    } else if (resp.status !== 404) {
-      throw new Error("GitHub error " + resp.status);
-    }
+    /* pull this account's row */
+    const { data: rows, error: selErr } = await sb.from("app_state")
+      .select("data, updated_at")
+      .eq("user_id", currentUser.id);
+    if (selErr) throw new Error(friendlySyncError(selErr));
+    const row = rows && rows[0];
 
     /* merge remote into local */
-    if (remote) {
-      const merged = mergeStates(stateSnapshot(), remote);
+    if (row && row.data) {
+      const merged = mergeStates(stateSnapshot(), row.data);
       state.settings = merged.settings;
       state.customers = merged.customers.sort((a, b) => a.name.localeCompare(b.name));
       state.jobs = merged.jobs;
@@ -642,20 +889,30 @@ async function syncNow() {
       renderJobs();
     }
 
-    /* push back if we have anything the remote doesn't */
-    if (!remote || stableStr(stateSnapshot()) !== stableStr(remote)) {
-      const put = await ghContents("PUT", {
-        message: "sync " + new Date().toISOString(),
-        content: b64encode(JSON.stringify(stateSnapshot(), null, 1)),
-        ...(sha ? { sha } : {}),
-      });
-      if (put.status === 409 || put.status === 422) throw new Error("Another device synced at the same moment — press Sync now again.");
-      if (!put.ok) throw new Error("GitHub push failed (" + put.status + ")");
+    /* push back if we have anything the cloud doesn't */
+    if (!row) {
+      const { error: insErr } = await sb.from("app_state")
+        .insert({ user_id: currentUser.id, data: stateSnapshot(), updated_at: new Date().toISOString() });
+      if (insErr) throw new Error(friendlySyncError(insErr));
+    } else if (stableStr(stateSnapshot()) !== stableStr(row.data)) {
+      // optimistic concurrency: only overwrite the exact version we merged with
+      const { data: updated, error: updErr } = await sb.from("app_state")
+        .update({ data: stateSnapshot(), updated_at: new Date().toISOString() })
+        .eq("user_id", currentUser.id)
+        .eq("updated_at", row.updated_at)
+        .select("updated_at");
+      if (updErr) throw new Error(friendlySyncError(updErr));
+      if (!updated || !updated.length) {
+        // another device wrote in between — re-merge on the next pass
+        syncing = false;
+        scheduleSync();
+        return;
+      }
     }
     localStorage.setItem("mmr_last_sync", String(Date.now()));
     setSyncStatus("✓ Synced " + new Date().toLocaleTimeString());
   } catch (e) {
-    setSyncStatus("⚠ " + (e.name === "AbortError" ? "GitHub not reachable (offline?)" : e.message));
+    setSyncStatus("⚠ " + friendlySyncError(e));
   } finally {
     syncing = false;
   }
@@ -799,7 +1056,7 @@ function renderPlan() {
   tabs.innerHTML = ""; sched.innerHTML = ""; warnBox.innerHTML = "";
   $("day-actions").innerHTML = "";
   $("plan-summary").textContent = "";
-  planLayer.clearLayers();
+  if (map) clearOverlays();
   if (!plan) return;
 
   for (const w of plan.warnings) {
@@ -868,32 +1125,35 @@ function renderPlan() {
     (plan.days.length > 1 ? ` — ${plan.days.length} days total` : "");
 
   /* map */
-  const baseIcon = L.divIcon({ className: "", html: '<div class="base-marker">🏠</div>', iconSize: [28, 28], iconAnchor: [14, 14] });
-  L.marker([plan.base.lat, plan.base.lon], { icon: baseIcon })
-    .bindPopup("Home base<br>" + esc(s.baseAddress)).addTo(planLayer);
+  if (!map) return;
+  const basePos = { lat: plan.base.lat, lng: plan.base.lon };
+  addBaseMarker(basePos, "<b>Home base</b><br>" + esc(s.baseAddress));
 
-  const bounds = [[plan.base.lat, plan.base.lon]];
+  const bounds = new google.maps.LatLngBounds();
+  bounds.extend(basePos);
   day.stops.forEach((st, i) => {
-    const icon = L.divIcon({
-      className: "",
-      html: `<div class="num-marker" style="background:${color}">${i + 1}</div>`,
-      iconSize: [26, 26], iconAnchor: [13, 13],
-    });
-    L.marker([st.coord.lat, st.coord.lon], { icon })
-      .bindPopup(`<b>#${i + 1} ${esc(st.cust.name)}</b><br>${esc(st.job.desc || "")}<br>` +
-                 `${esc(st.cust.address)}<br>ETA ${fmtTime(st.arrive)}`)
-      .addTo(planLayer);
-    bounds.push([st.coord.lat, st.coord.lon]);
+    const pos = { lat: st.coord.lat, lng: st.coord.lon };
+    addStopMarker(pos, color, i + 1,
+      `<b>#${i + 1} ${esc(st.cust.name)}</b><br>${esc(st.job.desc || "")}<br>` +
+      `${esc(st.cust.address)}<br>ETA ${fmtTime(st.arrive)}`);
+    bounds.extend(pos);
   });
 
-  if (day.geometry) {
-    L.polyline(day.geometry, { color, weight: 4, opacity: 0.75 }).addTo(planLayer);
-  } else {
-    const pts = [[plan.base.lat, plan.base.lon], ...day.stops.map(st => [st.coord.lat, st.coord.lon])];
-    if (s.returnToBase) pts.push([plan.base.lat, plan.base.lon]);
-    L.polyline(pts, { color, weight: 3, dashArray: "6 6", opacity: 0.7 }).addTo(planLayer);
-  }
-  map.fitBounds(bounds, { padding: [40, 40] });
+  const pathPts = day.geometry
+    ? day.geometry.map(([lat, lon]) => ({ lat, lng: lon }))
+    : (() => {
+        const pts = [basePos, ...day.stops.map(st => ({ lat: st.coord.lat, lng: st.coord.lon }))];
+        if (s.returnToBase) pts.push(basePos);
+        return pts;
+      })();
+  planOverlays.push(new google.maps.Polyline({
+    map,
+    path: pathPts,
+    strokeColor: color,
+    strokeWeight: 4,
+    strokeOpacity: day.geometry ? 0.75 : 0.45,
+  }));
+  map.fitBounds(bounds, 48);
 }
 
 /* ------------------------- wiring ------------------------- */
@@ -920,14 +1180,12 @@ function wireUI() {
   $("set-return").addEventListener("change", e => { state.settings.returnToBase = e.target.checked; touchSettings(); });
   $("set-notify").addEventListener("change", e => { state.settings.notifyTemplate = e.target.value; touchSettings(); });
 
-  // sync
-  $("sync-token").value = getSyncToken();
-  $("sync-token").addEventListener("change", e => {
-    const v = e.target.value.trim();
-    if (v) localStorage.setItem(TOKEN_KEY, v); else localStorage.removeItem(TOKEN_KEY);
-    if (v) syncNow();
-  });
+  // account & sync
   $("btn-sync").addEventListener("click", () => syncNow());
+  $("btn-signout").addEventListener("click", () => sb && sb.auth.signOut());
+  $("btn-signin").addEventListener("click", doSignIn);
+  $("btn-signup").addEventListener("click", doSignUp);
+  $("auth-pass").addEventListener("keydown", e => { if (e.key === "Enter") doSignIn(); });
 
   // import
   $("import-file").addEventListener("change", e => {
@@ -974,9 +1232,11 @@ function wireUI() {
       phone: $("cust-phone").value.trim(),
       email: $("cust-email").value.trim(),
       vehicle: $("cust-vehicle").value.trim(),
-      lat: null, lon: null,
+      lat: pendingCustCoord ? pendingCustCoord.lat : null,
+      lon: pendingCustCoord ? pendingCustCoord.lon : null,
       updatedAt: Date.now(),
     });
+    pendingCustCoord = null;
     state.customers.sort((a, b) => a.name.localeCompare(b.name));
     saveState(); renderCustomers();
     ["cust-name", "cust-address", "cust-phone", "cust-email", "cust-vehicle"].forEach(id => $(id).value = "");
@@ -1037,13 +1297,13 @@ function wireUI() {
 /* ------------------------- init ------------------------- */
 
 loadState();
-initMap();
+loadGoogleMaps();
+initMap(); // resolves once the Maps script is ready
 wireUI();
 renderCustomers();
 renderJobs();
+initSupabase(); // shows the login screen or restores the session, then syncs
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW registration failed", e));
 }
-
-if (getSyncToken()) syncNow(); // pull latest from other devices on launch

@@ -10,7 +10,6 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -80,22 +79,17 @@
       </div>
     </section>
 
-    <!-- SYNC -->
-    <section class="panel" id="panel-sync">
-      <h2 class="panel-header" data-toggle="sync-body">☁️ Sync between devices <span class="chev">▾</span></h2>
-      <div class="panel-body" id="sync-body">
-        <p class="hint">Keeps customers, jobs, and settings identical on your PC and phone,
-        stored in your private GitHub repo <b>mechanic-router-data</b>. One-time setup on each device:
-        paste an access token below. To create it: github.com → Settings → Developer settings →
-        <b>Fine-grained tokens</b> → Generate new token → Repository access: <b>only mechanic-router-data</b>
-        → Permissions: <b>Contents — Read and write</b>. Set a long expiration.</p>
-        <label>GitHub access token
-          <input type="password" id="sync-token" placeholder="github_pat_…" autocomplete="off">
-        </label>
-        <button id="btn-sync" class="primary">☁ Sync now</button>
+    <!-- ACCOUNT -->
+    <section class="panel" id="panel-account">
+      <h2 class="panel-header" data-toggle="account-body">👤 Account <span class="chev">▾</span></h2>
+      <div class="panel-body" id="account-body">
+        <div class="hint" id="account-info"></div>
+        <div class="row2">
+          <button id="btn-sync" class="primary">☁ Sync now</button>
+          <button id="btn-signout">Sign out</button>
+        </div>
         <div class="hint" id="sync-status"></div>
-        <p class="hint">Sync also runs automatically when the app opens and a few seconds after every change.
-        The token is stored only on this device.</p>
+        <p class="hint">Everything saves to your account automatically — sign in on any device to pick up where you left off.</p>
       </div>
     </section>
 
@@ -162,8 +156,25 @@
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<div id="auth-screen">
+  <div id="auth-card">
+    <div id="auth-logo">🔧</div>
+    <h2>Route Planner</h2>
+    <p class="hint">Sign in — your customers, jobs, and routes follow your account to every device.</p>
+    <label>Email
+      <input type="email" id="auth-email" autocomplete="username" placeholder="you@example.com">
+    </label>
+    <label>Password
+      <input type="password" id="auth-pass" autocomplete="current-password">
+    </label>
+    <button id="btn-signin" class="primary">Sign in</button>
+    <button id="btn-signup">Create account</button>
+    <div id="auth-msg" class="hint"></div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
